@@ -1,21 +1,43 @@
-// app/api/plan/route.ts
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
+import { generatePlan } from "../../../lib/ai";
 
-export async function POST() {
-  return NextResponse.json({
-    plan: {
-      childType: "興奮しやすい",
-      summary: "刺激に反応しやすく、切り替えが難しい傾向があります。",
-      top3: [
-        { title: "抱っこして安全を確保", reason: "安心感を最優先にする" },
-        { title: "照明を落とす", reason: "刺激を減らす" },
-        { title: "声かけを短くする", reason: "情報量を減らす" }
-      ],
-      order: ["抱っこ", "照明を落とす", "声かけを短く"],
-      duration: "2〜3日",
-      nextStep: "反応が弱ければ方法②へ",
-      ngActions: ["急がせる", "叱る"],
-      parentComment: "今の対応は間違っていません。"
+export const runtime = "nodejs";
+
+export async function POST(req: NextRequest) {
+  try {
+    const body = await req.json().catch(() => ({}));
+
+    const childType = String(body?.childType ?? "").trim();
+    const problem = String(body?.problem ?? "").trim();
+
+    if (!childType || !problem) {
+      return NextResponse.json({ error: "INVALID_INPUT" }, { status: 400 });
     }
-  });
+
+    const plan = await generatePlan({ childType, problem });
+
+    // フロントが data.plan を期待しているのでこの形
+    return NextResponse.json({ plan });
+  } catch (e) {
+    // ここに来ても「止めない」設計（フェーズBの目的）
+    const fallback = {
+      plan: {
+        childType: "未指定",
+        summary: "一時的にプラン生成に失敗しました。まずは負荷を下げて短く試します。",
+        top3: [
+          { title: "3分だけで終了", reason: "短い成功を作る" },
+          { title: "刺激を減らす", reason: "泣きの加速を止める" },
+          { title: "予告→実行を固定", reason: "切り替えを楽にする" },
+        ],
+        order: ["① 3分だけ", "② 刺激を減らす", "③ 予告→実行固定"],
+        duration: "3日",
+        nextStep: "変化が薄い場合は時間帯をずらす/成功回数を増やす方向に切り替えます。",
+        ngActions: ["叱りながら続ける", "毎回ルールを変える", "説明を増やしすぎる"],
+        parentComment:
+          "大丈夫。あなたもお子さんも全く悪くないです。今日は短く区切って、できたところだけ拾えばOK。",
+      },
+    };
+
+    return NextResponse.json(fallback, { status: 200 });
+  }
 }
