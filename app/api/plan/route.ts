@@ -1,43 +1,45 @@
 import { NextRequest, NextResponse } from "next/server";
-import { generatePlan } from "../../../lib/ai";
+import { generatePlan } from "@/lib/ai";
 
 export const runtime = "nodejs";
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json().catch(() => ({}));
+    const {
+      childType,
+      problem,
+      triggers = [],
+      parentStress = "",
+      ageGroup = "3",
+    } = await req.json();
 
-    const childType = String(body?.childType ?? "").trim();
-    const problem = String(body?.problem ?? "").trim();
+    const plan = await generatePlan({
+      childType,
+      problem,
+      triggers,
+      parentStress,
+      ageGroup,
+    });
 
-    if (!childType || !problem) {
-      return NextResponse.json({ error: "INVALID_INPUT" }, { status: 400 });
-    }
-
-    const plan = await generatePlan({ childType, problem });
-
-    // フロントが data.plan を期待しているのでこの形
     return NextResponse.json({ plan });
   } catch (e) {
-    // ここに来ても「止めない」設計（フェーズBの目的）
-    const fallback = {
+    // UIを止めないため、必ず返す
+    return NextResponse.json({
       plan: {
         childType: "未指定",
-        summary: "一時的にプラン生成に失敗しました。まずは負荷を下げて短く試します。",
+        summary: "一時的に生成できませんでした。",
         top3: [
-          { title: "3分だけで終了", reason: "短い成功を作る" },
-          { title: "刺激を減らす", reason: "泣きの加速を止める" },
-          { title: "予告→実行を固定", reason: "切り替えを楽にする" },
+          { title: "環境を暗くする", reason: "刺激を減らす" },
+          { title: "声かけを短くする", reason: "情報量を減らす" },
+          { title: "3分で区切る", reason: "成功体験を作る" },
         ],
-        order: ["① 3分だけ", "② 刺激を減らす", "③ 予告→実行固定"],
-        duration: "3日",
-        nextStep: "変化が薄い場合は時間帯をずらす/成功回数を増やす方向に切り替えます。",
-        ngActions: ["叱りながら続ける", "毎回ルールを変える", "説明を増やしすぎる"],
+        order: ["環境を暗くする", "声かけを短くする", "3分で区切る"],
+        duration: "2〜3日",
+        nextStep: "時間帯をずらして再試行",
+        ngActions: ["急かす", "説得を続ける", "叱る"],
         parentComment:
-          "大丈夫。あなたもお子さんも全く悪くないです。今日は短く区切って、できたところだけ拾えばOK。",
+          "大丈夫。あなたもお子さんも全く悪くないです。今日は短く区切ってOK。",
       },
-    };
-
-    return NextResponse.json(fallback, { status: 200 });
+    });
   }
 }
