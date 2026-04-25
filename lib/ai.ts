@@ -1,8 +1,6 @@
 import OpenAI from "openai";
 
-export const AI_TS_VERSION = "2026-04-24_ai_top5_reason_guardrails_v1";
-
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY! });
+export const AI_TS_VERSION = "2026-04-24_top5_modeA_parentAI_noDecl_backtickFree_v4";
 
 export type Scene = "now" | "daily";
 export type AgeGroup = "1" | "2" | "3" | "4";
@@ -33,51 +31,26 @@ export type GenerateInput = {
   anonUserId?: string;
 };
 
-// --- ガードレール（「今困ってる」なのに習慣/長期が混ざるのを弾く / 「普段」なのに即効テクが混ざるのを弾く） ---
-const NOW_BANNED = [
-  /ルーティン/i,
-  /習慣/i,
-  /毎日/i,
-  /明日から/i,
-  /継続/i,
-  /心がけ/i,
-  /意識/i,
-  /週/i,
-  /\d+\s*日/,
-  /1週間/,
-  /2週間/,
-  /長期/i,
-];
-
-const DAILY_BANNED = [
-  /今すぐ/i,
-  /\d+\s*分/,
-  /3分/,
-  /5分/,
-  /10分/,
-  /15分/,
-  /すぐに/i,
-  /今夜/i,
-  /この瞬間/i,
-];
-
-function asScene(v: any): Scene {
-  return v === "daily" ? "daily" : "now";
-}
-
-function asAgeGroup(v: any): AgeGroup {
-  const s = String(v ?? "3");
-  if (s === "1" || s === "2" || s === "3" || s === "4") return s;
-  return "3";
-}
-
-function safeText(v: any, fallback = ""): string {
+function safeText(v: unknown, fallback = ""): string {
   return typeof v === "string" ? v : fallback;
 }
 
-function safeArrayOfStrings(v: any): string[] {
+function safeArrayOfStrings(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
-  return v.filter((x) => typeof x === "string").map((x) => x.trim()).filter(Boolean);
+  return v
+    .filter((x) => typeof x === "string")
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
+function asScene(v: unknown): Scene {
+  return v === "daily" ? "daily" : "now";
+}
+
+function asAgeGroup(v: unknown): AgeGroup {
+  const s = String(v ?? "3");
+  if (s === "1" || s === "2" || s === "3" || s === "4") return s;
+  return "3";
 }
 
 function extractJson(text: string): string | null {
@@ -86,292 +59,390 @@ function extractJson(text: string): string | null {
   return m ? m[0] : null;
 }
 
-function violates(scene: Scene, item: PlanItem): boolean {
-  const t = `${item.title} ${item.reason}`;
+function getClient(): OpenAI {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("Missing OPENAI_API_KEY");
+  return new OpenAI({ apiKey });
+}
+
+function getModel(): string {
+  return process.env.OPENAI_MODEL || "gpt-4o-mini";
+}
+
+const NOW_BANNED: RegExp[] = [
+  /ルーティン/,
+  /習慣/,
+  /毎日/,
+  /明日から/,
+  /継続/,
+  /心がけ/,
+  /意識/,
+  /慣らす/,
+  /体質/,
+  /週間/,
+  /\d+\s*日/,
+  /1週間/,
+  /2週間/,
+  /長期/,
+];
+
+const DAILY_BANNED: RegExp[] = [
+  /今すぐ/,
+  /今夜/,
+  /この瞬間/,
+  /すぐに/,
+  /\d+\s*分/,
+  /3分/,
+  /5分/,
+  /10分/,
+  /15分/,
+];
+
+function violatesScene(scene: Scene, item: PlanItem): boolean {
+  const t = item.title + " " + item.reason;
   const banned = scene === "now" ? NOW_BANNED : DAILY_BANNED;
   return banned.some((re) => re.test(t));
 }
 
-function defaultSummary(scene: Scene): string {
-  return scene === "now"
-    ? "刺激や切り替えに反応しやすい状態です。まずは“今この場”で落ち着ける条件を作るのが近道です。"
-    : "同じパターンが繰り返されやすい状態です。明日から整えられる『土台』を作るとラクになります。";
+function reasonHasEvidence(reason: string): boolean {
+  return /『[^』]+』/.test(reason);
 }
 
-function defaultTop5(scene: Scene): PlanItem[] {
-  if (scene === "now") {
-    return [
-      {
-        title: "刺激を減らす（光・音・声）",
-        reason: "『刺激が多かった／眠そう／空腹』などの条件だと興奮が上がりやすいので、まず入力を減らすのが成功率高めです。",
-      },
-      {
-        title: "声かけを5語以内にする",
-        reason: "興奮しやすい/切り替え苦手の傾向があると、長い説明で逆に荒れやすいので情報量を絞るのが効きやすいです。",
-      },
-      {
-        title: "3分で区切って一度終える",
-        reason: "『今すごく困ってる』状況では長期戦が逆効果になりやすいので、短い成功体験で落ち着きを作るのが有効です。",
-      },
-      {
-        title: "水分・トイレだけ先に済ませる",
-        reason: "『空腹・のどが渇いている』があると不快で寝付きにくいので、最小の不快要因を先に消すのが近道です。",
-      },
-      {
-        title: "場所を変えてクールダウンする",
-        reason: "『刺激が多かった/予定変更』の後は切り替えが難しいことが多いので、環境を変えてリセットするのが効きやすいです。",
-      },
-    ];
-  }
+const PARENT_DECLARATION_NG: RegExp[] = [
+  /してあげたい/,
+  /していきたい/,
+  /していきます/,
+  /したいと思います/,
+  /頑張りましょう/,
+  /やっていきましょう/,
+  /していきましょう/,
+  /まずは/,
+  /私は/,
+  /わたしは/,
+];
 
-  // daily
-  return [
-    {
-      title: "寝る前の流れを3ステップで固定する",
-      reason: "『興奮しやすい/不安になりやすい』タイプは見通しがあると落ち着きやすいので、毎晩同じ順番が効きやすいです。",
-    },
-    {
-      title: "寝室の刺激（光・音・おもちゃ）を減らす",
-      reason: "『刺激が多かった』が絡むと寝付きが崩れやすいので、環境側を整えると成功確率が上がりやすいです。",
-    },
-    {
-      title: "寝る前の活動を“落ちる系”に寄せる",
-      reason: "『眠そうなのに寝ない』は興奮が残っていることが多いので、体を落としていく活動に寄せると効果が出やすいです。",
-    },
-    {
-      title: "就寝時刻を“だいたい一定”に寄せる",
-      reason: "同じ時刻に眠るリズムができると入眠が早くなることが多いので、3日〜1週間の範囲で効いてきやすいです。",
-    },
-    {
-      title: "うまくいった条件をメモして再現する",
-      reason: "『この子に合う順番』は条件依存になりやすいので、当たりパターンを潰さず再現するほど精度が上がります。",
-    },
-  ];
+function isParentCommentInvalid(text: string): boolean {
+  const t = (text || "").trim();
+  if (!t) return true;
+
+  const sentences = t.split(/。|！|!|\?/).filter((x) => x.trim().length > 0);
+  if (sentences.length < 3) return true;
+  if (sentences.length > 10) return true;
+
+  if (PARENT_DECLARATION_NG.some((re) => re.test(t))) return true;
+
+  const hasNotAlone = /(あなただけじゃない|あなただけではない|ひとりじゃない|一人じゃない)/.test(t);
+  const hasNotOnlyYourChild = /(あなたの子だけじゃない|あなたのお子さんだけじゃない|その子だけじゃない)/.test(t);
+  const hasManySame = /(みんな|多くの親|同じ悩み|同じことで悩む|似たことで悩む)/.test(t);
+  if (!(hasNotAlone && (hasNotOnlyYourChild || hasManySame))) return true;
+
+  const calming = /(深呼吸|肩の力|いったん|落ち着|大丈夫|今日はこれでOK|今はこれでOK|ゆっくり)/.test(t);
+  if (!calming) return true;
+
+  return false;
 }
 
-function normalizeTop5(scene: Scene, raw: any): PlanItem[] {
-  const fallback = defaultTop5(scene);
+function fallbackPlan(scene: Scene, childType: string): PlanResult {
+  const top5: PlanItem[] =
+    scene === "now"
+      ? [
+          {
+            title: "刺激を減らす（光・音・声）",
+            reason:
+              "『刺激が多かった』『眠そう』『空腹・のどが渇いている』があると興奮が上がりやすいので、まず入力を減らすのが近道です。",
+          },
+          {
+            title: "声かけを5語以内にする",
+            reason:
+              "『興奮しやすい』『切り替えが苦手』のときは長い説明で逆に荒れやすいので、情報量を絞るのが効きやすいです。",
+          },
+          {
+            title: "3分で区切って一度終える",
+            reason:
+              "『今すごく困ってる』状況では長期戦が逆効果になりやすいので、短い成功体験で落ち着きを作るのが有効です。",
+          },
+          {
+            title: "水分・トイレだけ先に済ませる",
+            reason:
+              "『空腹・のどが渇いている』が絡むと不快で寝付きにくいので、不快要因を先に消すのが効きやすいです。",
+          },
+          {
+            title: "場所を変えてクールダウンする",
+            reason:
+              "『刺激が多かった』『予定変更があった』の後は切り替えが難しいことが多いので、環境を変えてリセットするのが効きやすいです。",
+          },
+        ]
+      : [
+          {
+            title: "寝る前の流れを3ステップで固定する",
+            reason:
+              "『興奮しやすい』『不安になりやすい』タイプは見通しがあると落ち着きやすいので、毎晩同じ順番が効きやすいです。",
+          },
+          {
+            title: "寝室の刺激（光・音・おもちゃ）を減らす",
+            reason:
+              "『刺激が多かった』が絡むと寝付きが崩れやすいので、環境側を整えると成功確率が上がりやすいです。",
+          },
+          {
+            title: "就寝前の活動を\"落ちる系\"に寄せる",
+            reason:
+              "『眠そうなのに寝ない』は興奮が残っていることが多いので、落ちる活動に寄せると効果が出やすいです。",
+          },
+          {
+            title: "就寝時刻を\"だいたい一定\"に寄せる",
+            reason:
+              "『普段から困ってる』場合はリズムを整えるほど効きやすいので、3日〜1週間単位で改善しやすいです。",
+          },
+          {
+            title: "うまくいった条件をメモして再現する",
+            reason:
+              "『この子に合う順番』は条件依存になりやすいので、当たりパターンを再現するほど精度が上がります。",
+          },
+        ];
 
-  if (!Array.isArray(raw) || raw.length === 0) return fallback;
+  const parentComment =
+    scene === "now"
+      ? "大丈夫。あなただけじゃないです。あなたの子だけじゃないです。みんな同じように悩みます。いったん深呼吸して、いまは\"短く区切る\"だけでOKです。落ち着けたら次の一手に進めます。"
+      : "大丈夫。あなただけじゃないです。あなたの子だけじゃないです。みんな同じように悩みます。肩の力を少し抜いて、3日〜1週間単位で見てOKです。小さく整えるだけでも効いてきます。";
 
-  const items: PlanItem[] = raw.slice(0, 5).map((x: any, idx: number) => {
-    const title = safeText(x?.title, fallback[idx]?.title ?? "").trim();
-    const reason = safeText(x?.reason, fallback[idx]?.reason ?? "").trim();
-    return { title, reason };
-  });
+  const summary =
+    scene === "now"
+      ? "刺激や切り替えに反応しやすい状態です。まずは\"今この場\"で落ち着ける条件を作るのが近道です。"
+      : "同じパターンが繰り返されやすい状態です。明日から整えられる『土台』を作るとラクになります。";
 
-  // 欠損補完
-  const filled = items.map((it, idx) => {
-    const ft = fallback[idx];
-    return {
-      title: it.title || ft.title,
-      reason: it.reason || ft.reason,
-    };
-  });
-
-  // シーン不一致を差し替え
-  const fixed = filled.map((it, idx) => (violates(scene, it) ? fallback[idx] : it));
-
-  // 全部ダメならフォールバック
-  const allBad = fixed.every((it) => violates(scene, it));
-  return allBad ? fallback : fixed;
-}
-
-function normalizeDuration(scene: Scene, raw: any): string {
-  const s = safeText(raw, "").trim();
-  if (scene === "now") {
-    // now なのに 日/週 系が来たら分に矯正
-    if (/(日|週間|週)/.test(s)) return "5〜10分";
-    return s || "5〜10分";
-  }
-  // daily なのに 分 が来たら日へ矯正
-  if (/(分)/.test(s)) return "3日";
-  return s || "3日";
-}
-
-function normalizeNextStep(scene: Scene, raw: any, top5: PlanItem[]): string {
-  const s = safeText(raw, "").trim();
-  if (s) return s;
-
-  if (scene === "now") {
-    return `まずTOP1（${top5[0]?.title ?? "刺激を減らす"}）を5分だけ試して、反応が薄ければTOP2へ。`;
-  }
-  return `明日からTOP1（${top5[0]?.title ?? "寝る前の流れを固定"}）を3日試して、変化が薄ければTOP2へ。`;
-}
-
-function normalizeNgActions(raw: any): string[] {
-  const fallback = ["急かす", "説得を続ける", "叱る"];
-  const arr = safeArrayOfStrings(raw);
-  return arr.length ? arr.slice(0, 8) : fallback;
-}
-
-function makeParentComment(scene: Scene, parentStress: string, problem: string): string {
-  // LLMに任せず固定生成（宣言文が混ざらない）
-  const stress = safeText(parentStress, "");
-  const p = safeText(problem, "").trim();
-  const has = (k: string) => stress.includes(k);
-
-  if (scene === "now") {
-    if (has("周りの目")) return "大丈夫。落ち着くことが最優先です。今日は短く区切ってOKです。";
-    if (has("イライラ") || has("自己嫌悪")) return "大丈夫。イライラしてしまうのは普通です。今日は短く区切ってOKです。";
-    if (has("焦")) return "大丈夫。焦る気持ちは自然です。今日は短く区切ってOKです。";
-    if (has("孤独") || has("ワンオペ")) return "大丈夫。ひとりで抱えなくていいです。今日は短く区切ってOKです。";
-    if (/(寝ない|泣|癇癪|暴れ|拒否)/.test(p)) return "大丈夫。落ち着くための一手で十分です。今日は短く区切ってOKです。";
-    return "大丈夫。落ち着くための一手で十分です。今日は短く区切ってOKです。";
-  }
-
-  // daily
-  if (has("周りの目")) return "大丈夫。家の中で整えられれば十分です。3日〜1週間単位で見てOKです。";
-  if (has("イライラ") || has("自己嫌悪")) return "大丈夫。イライラしてしまうのは普通です。3日〜1週間単位で見てOKです。";
-  if (has("焦")) return "大丈夫。焦る気持ちは自然です。3日〜1週間単位で見てOKです。";
-  if (has("孤独") || has("ワンオペ")) return "大丈夫。ひとりで抱えなくていいです。3日〜1週間単位で見てOKです。";
-  return "大丈夫。少しずつ整えれば十分です。3日〜1週間単位で見てOKです。";
+  return {
+    childType: childType || "未指定",
+    summary,
+    top5,
+    order: top5.map((x) => x.title),
+    duration: scene === "now" ? "5〜10分" : "3日",
+    nextStep:
+      scene === "now"
+        ? "まずTOP1を5分だけ試して、反応が薄ければTOP2へ。"
+        : "明日からTOP1を3日試して、変化が薄ければTOP2へ。",
+    ngActions: ["急かす", "説得を続ける", "叱る"],
+    parentComment,
+  };
 }
 
 function buildSystemPrompt(scene: Scene): string {
-  const nowSpec = `
-MODE: NOW (今すごく困ってる)
-- TOP5は「今から10分以内に始められる」「今夜その場でできる」具体策のみ
-- ルーティン/習慣/毎日/明日から/週/日数 など長期運用ワードは禁止
-- durationは「分」だけ（例: 3分 / 5〜10分）
-`;
+  const nowSpec = [
+    "MODE: NOW (urgent)",
+    "- TOP5 must be actions you can start within 10 minutes, doable tonight.",
+    "- FORBIDDEN in TOP5: routine/habit/daily/tomorrow/days/weeks/long-term.",
+    "- duration must be minutes only (e.g. \"3分\" or \"5〜10分\").",
+  ].join("\n");
 
-  const dailySpec = `
-MODE: DAILY (今じゃないけど普段から困ってる)
-- TOP5は「明日からできる」「日常で整える」具体策のみ
-- 今すぐ/◯分/この瞬間/今夜 など即効ワードは禁止
-- durationは「日〜週」だけ（例: 3日 / 1週間）
-`;
+  const dailySpec = [
+    "MODE: DAILY (recurring)",
+    "- TOP5 must be actions to practice from tomorrow / daily-life adjustments.",
+    "- FORBIDDEN in TOP5: now/tonight/immediately and minute-based tricks.",
+    "- duration must be days or weeks only (e.g. \"3日\" or \"1週間\").",
+  ].join("\n");
 
-  return `
-You are a parenting support AI.
-Return ONLY valid JSON. No markdown. No extra text.
-All text must be Japanese.
-No abstract advice. No moral judgment. No blaming.
+  const core = [
+    "You are a parenting support AI.",
+    "Return ONLY valid JSON. No markdown. No extra text.",
+    "All text must be Japanese.",
+    "No abstract advice. No moral judgment. No blaming.",
+    "",
+    "CRITICAL OUTPUT RULES:",
+    "1) Decide TOP5 in likely success order for THIS input.",
+    "2) Each TOP5 item must include a reason with explicit evidence.",
+    "   The reason MUST quote at least one input signal in Japanese quotes like 『眠そう』 or 『周りの目がつらい』.",
+    "3) Titles must be short, action-oriented.",
+    "4) parentComment MUST be 3-7 sentences, longer encouragement.",
+    "   It MUST include: あなただけじゃない AND (あなたの子だけじゃない OR みんな同じ悩み).",
+    "   It must include at least one calming phrase (深呼吸/肩の力/いったん/落ち着く/大丈夫/ゆっくり).",
+    "   ABSOLUTE FORBIDDEN in parentComment: declarations like 〜したい / していきます / 頑張りましょう / まずは / 私は.",
+    "",
+    "JSON schema:",
+    "{ childType: string, summary: string, top5: [{title: string, reason: string}], order: string[], duration: string, nextStep: string, ngActions: string[], parentComment: string }",
+    "",
+    scene === "now" ? nowSpec : dailySpec,
+  ].join("\n");
 
-CRITICAL:
-- Decide TOP5 in the most likely success order for THIS input.
-- Each item MUST include a reason that explicitly references the user's input signals
-  (childType / triggers / parentStress / problem / ageGroup / scene).
-  Example: "『刺激が多かった』があるので〜" のように根拠を入れる。
-- Titles must be short and action-oriented.
-- Output must follow the schema exactly.
-
-${scene === "now" ? nowSpec : dailySpec}
-
-JSON schema:
-{
-  "childType": string,
-  "summary": string,
-  "top5": [{"title": string, "reason": string}],
-  "order": string[],
-  "duration": string,
-  "nextStep": string,
-  "ngActions": string[],
-  "parentComment": string
-}
-`.trim();
+  return core.trim();
 }
 
 function buildUserPrompt(input: GenerateInput, scene: Scene, ageGroup: AgeGroup): string {
-  const triggers = input.triggers?.length ? input.triggers.join(", ") : "(なし)";
-  const parentStress = input.parentStress?.trim() ? input.parentStress : "(なし)";
-  const problem = input.problem?.trim() ? input.problem : "(なし)";
+  const triggers = input.triggers.length ? input.triggers.join(", ") : "(none)";
+  const stress = input.parentStress.trim() ? input.parentStress : "(none)";
+  const problem = input.problem.trim() ? input.problem : "(none)";
 
-  return `
-Child type: ${input.childType}
-Age group: ${ageGroup}
-Scene: ${scene}
-Recent triggers: ${triggers}
-Parent state/feeling: ${parentStress}
-Problem description: ${problem}
+  const lines = [
+    "ChildType: " + input.childType,
+    "AgeGroup: " + ageGroup,
+    "Scene: " + scene,
+    "Triggers: " + triggers,
+    "ParentStress: " + stress,
+    "Problem: " + problem,
+    "",
+    "Remember:",
+    "- For EACH top5[i].reason, quote evidence using 『...』 from the above signals.",
+    "- parentComment must be encouragement with variation, no declarations.",
+    "- Output ONLY JSON.",
+  ];
 
-Remember:
-- TOP5 reasons must cite input signals (childType/triggers/parentStress/problem/ageGroup/scene).
-- Output ONLY JSON.
-`.trim();
+  return lines.join("\n").trim();
+}
+
+async function callLLM(system: string, user: string): Promise<string> {
+  const client = getClient();
+  const model = getModel();
+
+  const res = (await Promise.race([
+    client.chat.completions.create({
+      model,
+      temperature: 0.65,
+      max_tokens: 1100,
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+    }),
+    new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 8000)),
+  ])) as any;
+
+  return String(res?.choices?.[0]?.message?.content ?? "");
+}
+
+function validatePlan(scene: Scene, plan: any): { ok: true } | { ok: false; issues: string[] } {
+  const issues: string[] = [];
+
+  if (!plan || typeof plan !== "object") return { ok: false, issues: ["plan_not_object"] };
+
+  const top5 = plan?.top5;
+  if (!Array.isArray(top5) || top5.length < 5) issues.push("top5_missing_or_short");
+
+  if (Array.isArray(top5)) {
+    const slice = top5.slice(0, 5);
+
+    const sceneViolations = slice.filter((x: any) =>
+      violatesScene(scene, { title: safeText(x?.title, ""), reason: safeText(x?.reason, "") })
+    ).length;
+
+    const evidenceMissing = slice.filter((x: any) => !reasonHasEvidence(safeText(x?.reason, ""))).length;
+
+    if (sceneViolations >= 2) issues.push("scene_violation_many");
+    if (evidenceMissing >= 2) issues.push("evidence_missing_many");
+  }
+
+  const duration = safeText(plan?.duration, "");
+  if (scene === "now" && /(日|週|週間)/.test(duration)) issues.push("duration_wrong_for_now");
+  if (scene === "daily" && /(分)/.test(duration)) issues.push("duration_wrong_for_daily");
+
+  if (isParentCommentInvalid(safeText(plan?.parentComment, ""))) issues.push("parent_comment_invalid");
+
+  return issues.length ? { ok: false, issues } : { ok: true };
+}
+
+function normalizePlan(scene: Scene, input: GenerateInput, parsed: any): PlanResult {
+  const fallback = fallbackPlan(scene, input.childType || "未指定");
+
+  const childType = safeText(parsed?.childType, input.childType || "未指定").trim() || "未指定";
+  const summary = safeText(parsed?.summary, "").trim() || fallback.summary;
+
+  const rawTop5 = Array.isArray(parsed?.top5) ? parsed.top5 : [];
+  const top5: PlanItem[] = rawTop5.slice(0, 5).map((x: any, i: number) => {
+    const ft = fallback.top5[i];
+    const title = safeText(x?.title, ft.title).trim() || ft.title;
+    const reason = safeText(x?.reason, ft.reason).trim() || ft.reason;
+    const it: PlanItem = { title, reason };
+    return violatesScene(scene, it) ? ft : it;
+  });
+
+  while (top5.length < 5) top5.push(fallback.top5[top5.length]);
+
+  const order =
+    Array.isArray(parsed?.order) && parsed.order.length >= 5
+      ? parsed.order.map((x: any) => String(x)).slice(0, 5)
+      : top5.map((x) => x.title);
+
+  const durationRaw = safeText(parsed?.duration, "").trim();
+  const duration =
+    scene === "now"
+      ? /(日|週|週間)/.test(durationRaw) || !durationRaw
+        ? "5〜10分"
+        : durationRaw
+      : /(分)/.test(durationRaw) || !durationRaw
+        ? "3日"
+        : durationRaw;
+
+  const nextStepRaw = safeText(parsed?.nextStep, "").trim();
+  const nextStep =
+    nextStepRaw ||
+    (scene === "now"
+      ? "まずTOP1を5分だけ試して、反応が薄ければTOP2へ。"
+      : "明日からTOP1を3日試して、変化が薄ければTOP2へ。");
+
+  const ngActions =
+    Array.isArray(parsed?.ngActions) && parsed.ngActions.length
+      ? safeArrayOfStrings(parsed.ngActions).slice(0, 8)
+      : ["急かす", "説得を続ける", "叱る"];
+
+  const parentCommentRaw = safeText(parsed?.parentComment, "").trim();
+  const parentComment = isParentCommentInvalid(parentCommentRaw) ? fallback.parentComment : parentCommentRaw;
+
+  return { childType, summary, top5, order, duration, nextStep, ngActions, parentComment };
 }
 
 export async function generatePlan(input: GenerateInput): Promise<PlanResult> {
-  // 絶対に落ちない：この関数は throw しない
   try {
-    const scene = asScene(input?.scene);
-    const ageGroup = asAgeGroup(input?.ageGroup);
+    const scene = asScene((input as any)?.scene);
+    const ageGroup = asAgeGroup((input as any)?.ageGroup);
 
-    const system = buildSystemPrompt(scene);
-    const user = buildUserPrompt(
-      {
-        childType: safeText(input?.childType, "未指定"),
-        problem: safeText(input?.problem, ""),
-        ageGroup: safeText(input?.ageGroup, "3"),
-        triggers: safeArrayOfStrings(input?.triggers),
-        parentStress: safeText(input?.parentStress, ""),
-        scene,
-        anonUserId: safeText(input?.anonUserId, ""),
-      },
+    const safeInput: GenerateInput = {
+      childType: safeText((input as any)?.childType, "未指定"),
+      problem: safeText((input as any)?.problem, ""),
+      ageGroup: safeText((input as any)?.ageGroup, "3"),
+      triggers: safeArrayOfStrings((input as any)?.triggers),
+      parentStress: safeText((input as any)?.parentStress, ""),
       scene,
-      ageGroup
-    );
-
-    const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
-
-    const res = (await Promise.race([
-      client.chat.completions.create({
-        model,
-        temperature: 0.4,
-        max_tokens: 900,
-        messages: [
-          { role: "system", content: system },
-          { role: "user", content: user },
-        ],
-      }),
-      new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 8000)),
-    ])) as any;
-
-    const text = String(res?.choices?.[0]?.message?.content ?? "");
-    const jsonStr = extractJson(text);
-    const parsed = jsonStr ? JSON.parse(jsonStr) : null;
-
-    const childType = safeText(parsed?.childType, safeText(input?.childType, "未指定"));
-    const summary = safeText(parsed?.summary, defaultSummary(scene));
-
-    const top5 = normalizeTop5(scene, parsed?.top5);
-    const order =
-      Array.isArray(parsed?.order) && parsed.order.length === 5
-        ? parsed.order.map((x: any) => String(x)).slice(0, 5)
-        : top5.map((x) => x.title);
-
-    const duration = normalizeDuration(scene, parsed?.duration);
-    const nextStep = normalizeNextStep(scene, parsed?.nextStep, top5);
-    const ngActions = normalizeNgActions(parsed?.ngActions);
-
-    // parentComment は LLM 生成を使わず、入力からサーバ側で確実生成（宣言/作文が混ざらない）
-    const parentComment = makeParentComment(scene, safeText(input?.parentStress, ""), safeText(input?.problem, ""));
-
-    return {
-      childType,
-      summary,
-      top5,
-      order,
-      duration,
-      nextStep,
-      ngActions,
-      parentComment,
+      anonUserId: safeText((input as any)?.anonUserId, ""),
     };
+
+    // 1st generation
+    const system1 = buildSystemPrompt(scene);
+    const user1 = buildUserPrompt(safeInput, scene, ageGroup);
+    const text1 = await callLLM(system1, user1);
+    const jsonStr1 = extractJson(text1);
+    const parsed1 = jsonStr1 ? JSON.parse(jsonStr1) : null;
+
+    const v1 = validatePlan(scene, parsed1);
+    if (v1.ok) return normalizePlan(scene, safeInput, parsed1);
+
+    // retry once
+    const system2 = [
+      buildSystemPrompt(scene),
+      "",
+      "RETRY: Previous output had issues: " + v1.issues.join(", "),
+      "Fix strictly:",
+      "- top5 must have exactly 5 items.",
+      "- EACH reason must quote evidence using 『...』 from input signals.",
+      "- parentComment must satisfy constraints (no declarations, 3-7 sentences, not-alone meaning, calming phrase).",
+      "Return ONLY valid JSON.",
+    ].join("\n");
+
+    const user2 = [
+      buildUserPrompt(safeInput, scene, ageGroup),
+      "",
+      "Extra retry constraints:",
+      "- Reasons MUST include at least one of these exact signals in 『...』 when available:",
+      "  childType='" + safeInput.childType + "', triggers='" + safeInput.triggers.join(" / ") + "', parentStress='" + safeInput.parentStress + "'",
+      "- parentComment must avoid: してあげたい / していきたい / していきます / 頑張りましょう / まずは / 私は",
+    ].join("\n");
+
+    const text2 = await callLLM(system2, user2);
+    const jsonStr2 = extractJson(text2);
+    const parsed2 = jsonStr2 ? JSON.parse(jsonStr2) : null;
+
+    const v2 = validatePlan(scene, parsed2);
+    if (v2.ok) return normalizePlan(scene, safeInput, parsed2);
+
+    return fallbackPlan(scene, safeInput.childType);
   } catch {
-    // フォールバック（必ず返す）
-    const scene = asScene(input?.scene);
-    const fallbackTop5 = defaultTop5(scene);
-    return {
-      childType: safeText(input?.childType, "未指定"),
-      summary: defaultSummary(scene),
-      top5: fallbackTop5,
-      order: fallbackTop5.map((x) => x.title),
-      duration: scene === "now" ? "5〜10分" : "3日",
-      nextStep: normalizeNextStep(scene, "", fallbackTop5),
-      ngActions: ["急かす", "説得を続ける", "叱る"],
-      parentComment: makeParentComment(scene, safeText(input?.parentStress, ""), safeText(input?.problem, "")),
-    };
+    const scene = asScene((input as any)?.scene);
+    return fallbackPlan(scene, safeText((input as any)?.childType, "未指定"));
   }
 }
-``

@@ -7,14 +7,16 @@ type Scene = "now" | "daily";
 type AgeGroup = "1" | "2" | "3" | "4";
 
 type PlanItem = { title?: string; reason?: string };
+
 type PlanResult = {
+  childType?: string;
   summary?: string;
   top5?: PlanItem[];
+  order?: string[];
   duration?: string;
   nextStep?: string;
   ngActions?: string[];
   parentComment?: string;
-  childType?: string;
 };
 
 const SCENES: { value: Scene; label: string }[] = [
@@ -67,7 +69,6 @@ const STRESS = [
 export default function Page() {
   const anonUserId = useAnonUserId();
 
-  // ✅ TSXの曖昧解釈を避けるため type alias を使う
   const [scene, setScene] = useState<Scene>("now");
   const [childType, setChildType] = useState<string>(CHILD_TYPES[0]);
   const [ageGroup, setAgeGroup] = useState<AgeGroup>("3");
@@ -76,8 +77,8 @@ export default function Page() {
   const [problem, setProblem] = useState<string>("");
 
   const [result, setResult] = useState<PlanResult | null>(null);
-  const [loading, setLoading] = useState<boolean>(false);
-  const [err, setErr] = useState<string>("");
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
 
   const canSubmit = useMemo(() => !loading && problem.trim().length > 0, [loading, problem]);
 
@@ -105,15 +106,13 @@ export default function Page() {
         }),
       });
 
-      const data = await res.json().catch(() => ({} as any));
-
-      // ✅ { plan: ... } / 直返し の両方に耐える
-      const plan =
+      const data: any = await res.json().catch(() => ({}));
+      const plan: any =
         data?.plan && typeof data.plan === "object"
           ? data.plan
           : typeof data === "object"
-          ? data
-          : {};
+            ? data
+            : {};
 
       setResult(plan);
     } catch {
@@ -279,4 +278,3 @@ export default function Page() {
     </main>
   );
 }
-``
